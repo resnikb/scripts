@@ -89,7 +89,16 @@ function Pull-FromTfs {
 	if ($branch -ne "master") {
 		Write-Host "* Rebasing branch '$branch' on master"
 		git checkout $branch --force
-		git rebase master
+		git rebase -q master
+		while (Test-GitUncommittedChanges) {
+			Write-Host "* Rebase conflicts detect, please resolve to continue"
+			Run-GitExtensions mergeconflicts
+			if ($LastExitCode -ne 0) {
+				Write-Host "* Failed to rebase -- please fix manually"
+				Exit
+			}
+			& git rebase "--continue"
+		}
 	}
 }
 
@@ -99,3 +108,4 @@ if ($Action -eq "push") {
 	Pull-FromTfs
 }
 
+Write-Host "** Completed **"
