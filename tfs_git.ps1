@@ -43,19 +43,59 @@ function Get-TfsRemoteSpec {
     return $branch
 }
 
+function Get-TfsRemoteBranches {
+    return @(
+        git branch -r `
+            | %{ $_.Split('/')[-1].Trim() } `
+            | %{ if ($_ -eq 'default') {'master'} else {$_} }
+    )
+}
+
+function Get-GitBranchParent {
+    $branch = Get-GitBranch
+    $allRemoteBranches = Get-TfsRemoteBranches
+
+    if ($allRemoteBranches -contains $branch) {
+        return $branch
+    }
+
+    foreach ($remoteBranch in $allRemoteBranches) {
+        $candidates = @(
+            & git 'merge-base' $branch $remoteBranch `
+                | %{ & git branch '--contains' $_ } `
+                | %{ if ($_.StartsWith('*')) { $_.Substring(1).Trim() } else { $_.Trim() } } `
+                | ?{ $allRemoteBranches -contains $_ }
+        )
+
+        if ($candidates.Length -eq 1) {
+            return $candidates[0]
+        }
+
+        # If the only candidates are 'master' and another branch, prefer the other branch
+        # This caters for the case when a TFS branch is at the same commit as the trunk,
+        # and we are working off the branch
+        if ( ($candidates.Length -eq 2) -and ($candidates -contains 'master') ) {
+            return $candidates | ?{ $_ -ne 'master' }
+        }
+    }
+
+    throw "Cannot find unique TFS branch for '$branch'"
+}
+
 function Run-GitTfsCommand {
     Param
     (
         [Parameter(Mandatory=$true, Position=0)]
-        [String]
-        $Command
+        [String[]]
+        $Params
     )
 
     $remote = Get-TfsRemoteSpec
     if ($remote) {
-        & git tfs $Command -i "`"$remote`""
+        $Params += @('-i', "`"$remote`"")
+        & git tfs $Params
     } else {
-        & git tfs $Command
+        & git tfs $Params
     }
 }
 
@@ -94,14 +134,17 @@ function Push-ToTfs {
     Run-GitTfsCommand rcheckin
     if ($LastExitCode -ne 0) {
         Write-Host "* Failed to push to TFS"
-        if ($branch -ne "master") {
-            git checkout $branch --force
-        }
+    }
+
+    if ($branch -ne (Get-GitBranch)) {
+        git checkout $branch --force
     }
 }
 
 function Pull-FromTfs {
     $branch = Get-GitBranch
+    $remoteBranch = Get-GitBranchParent
+
     if (Test-GitUncommittedChanges) {
         Write-Host "* There are uncommitted changes in branch $branch. Please commit or reset to continue"
         Run-GitExtensions commit
@@ -112,27 +155,28 @@ function Pull-FromTfs {
         }
     }
     
-    $remote = Get-TfsRemoteSpec
-    $isTrunkBased = ($branch -ne "master") -and ($remote -eq $null)
-    if ($isTrunkBased) {
-        git checkout master --force
+    # Checkout the TFS tracking branch
+    if ($remoteBranch -ne $branch) {
+        git checkout $remoteBranch --force
     }
     
-    Write-Host "* Pulling changes from TFS $(if ($isTrunkBased -eq $false) {'(branch '+$remote+')'})"
-    Run-GitTfsCommand pull
-    if ($isTrunkBased) {
-        Write-Host "* Rebasing branch '$branch' on master"
+    Write-Host "* Pulling changes from TFS $(if ($remoteBranch -ne 'master') {'(branch '+$remoteBranch+')'})"
+    Run-GitTfsCommand @('pull', '--rebase')
+    
+    if ($remoteBranch -ne $branch) {
+        Write-Host "* Rebasing branch '$branch' on $remoteBranch"
         git checkout $branch --force
-        git rebase -q master
-        while (Test-GitUncommittedChanges) {
-            Write-Host "* Rebase conflicts detect, please resolve to continue"
-            Run-GitExtensions mergeconflicts
-            if ($LastExitCode -ne 0) {
-                Write-Host "* Failed to rebase -- please fix manually"
-                Exit
-            }
-            & git rebase "--continue"
+        git rebase -q $remoteBranch
+    }
+
+    while (Test-GitUncommittedChanges) {
+        Write-Host "* Conflicts detected, please resolve to continue"
+        Run-GitExtensions mergeconflicts
+        if ($LastExitCode -ne 0) {
+            Write-Host "* Failed to rebase -- please fix manually"
+            Exit
         }
+        & git rebase "--continue"
     }
 }
 
