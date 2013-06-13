@@ -118,6 +118,14 @@ function Run-GitExtensions {
         $gitex = $gitex.Definition
     }
 
+    if ([System.IO.Path]::GetExtension($gitex) -ne '.exe') {
+        $gitex = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($gitex), 'GitExtensions.exe')
+        if ((Test-Path $gitex) -eq $false) {
+            Write-Host "** Cannot find $gitex"
+            Exit 1
+        }
+    }
+
     $process = Start-Process $gitex -ArgumentList $ArgumentList -PassThru
     if ($NoWait -eq $false) {
         $process.WaitForExit()
