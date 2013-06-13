@@ -34,15 +34,6 @@ function Test-GitUncommittedChanges {
     return ( ($output -ne $null) -and ($output.Trim() -ne "") )
 }
 
-function Get-TfsRemoteSpec {
-    $branch = Get-GitBranch
-    if ( (& git branch '-r' | Select-String "/$branch") -eq $null ) {
-        return $null
-    }
-
-    return $branch
-}
-
 function Get-TfsRemoteBranches {
     return @(
         git branch -r `
@@ -90,8 +81,8 @@ function Run-GitTfsCommand {
         $Params
     )
 
-    $remote = Get-TfsRemoteSpec
-    if ($remote) {
+    $remote = Get-GitBranchParent
+    if ($remote -and ($remote -ne 'master')) {
         $Params += @('-i', "`"$remote`"")
         & git tfs $Params
     } else {
@@ -159,7 +150,7 @@ function Pull-FromTfs {
         
         if (Test-GitUncommittedChanges) {
             Write-Host "* Cannot continue due to uncommitted changes"
-            Exit
+            Exit 1
         }
     }
     
@@ -182,7 +173,7 @@ function Pull-FromTfs {
         Run-GitExtensions mergeconflicts
         if ($LastExitCode -ne 0) {
             Write-Host "* Failed to rebase -- please fix manually"
-            Exit
+            Exit 1
         }
         & git rebase "--continue"
     }
