@@ -134,7 +134,7 @@ function Push-ToTfs {
     
     # Occasionally, error 141 is reported by git,
     # and it seems that the workaround is to avoid rebasing during checkin
-    if ($LastExitCode -eq 141) {
+    if ($LastExitCode -eq 254) {
         Write-Host "* Regular checkin failed, trying to push without rebasing (less safe)"
 
         if ($branch -ne (Get-GitBranch)) {
