@@ -1,7 +1,7 @@
 ####################################################################################################################
 # This is a small utility script that implements basic workflow with git-tfs.
 #
-# Syntax: tfs_git.ps1 [push | pull]
+# Syntax: tfs_git.ps1 [push | pull | mergetrunk]
 #
 # The implement workflow is the following:
 #   1. git-tfs is used to clone TFS repository and to maintain the bridge between git and TFS
@@ -21,7 +21,7 @@
 Param
 (
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet("push", "pull")]
+    [ValidateSet('push', 'pull', 'mergetrunk')]
     $Action
 )
 
@@ -29,65 +29,14 @@ function Get-GitBranch {
     return (git branch | Select-String "\*").ToString().Substring(1).Trim()
 }
 
+function Test-GitRebaseInProgress {
+    $rootDir = git 'rev-parse' '--show-toplevel'
+    return (Test-Path -PathType Container (Join-Path $rootDir 'rebase-apply')) -or (Test-Path -PathType Container (Join-Path $rootDir 'rebase-merge'))
+}
+
 function Test-GitUncommittedChanges {
     $output = git status -z
     return ( ($output -ne $null) -and ($output.Trim() -ne "") )
-}
-
-function Get-TfsRemoteBranches {
-    return @(
-        git branch -r `
-            | %{ $_.Split('/')[-1].Trim() } `
-            | %{ if ($_ -eq 'default') {'master'} else {$_} }
-    )
-}
-
-function Get-GitBranchParent {
-    $branch = Get-GitBranch
-    $allRemoteBranches = Get-TfsRemoteBranches
-
-    if ($allRemoteBranches -contains $branch) {
-        return $branch
-    }
-
-    foreach ($remoteBranch in $allRemoteBranches) {
-        $candidates = @(
-            & git 'merge-base' $branch $remoteBranch `
-                | %{ & git branch '--contains' $_ } `
-                | %{ if ($_.StartsWith('*')) { $_.Substring(1).Trim() } else { $_.Trim() } } `
-                | ?{ $allRemoteBranches -contains $_ }
-        )
-
-        if ($candidates.Length -eq 1) {
-            return $candidates[0]
-        }
-
-        # If the only candidates are 'master' and another branch, prefer the other branch
-        # This caters for the case when a TFS branch is at the same commit as the trunk,
-        # and we are working off the branch
-        if ( ($candidates.Length -eq 2) -and ($candidates -contains 'master') ) {
-            return $candidates | ?{ $_ -ne 'master' }
-        }
-    }
-
-    throw "Cannot find unique TFS branch for '$branch'"
-}
-
-function Run-GitTfsCommand {
-    Param
-    (
-        [Parameter(Mandatory=$true, Position=0)]
-        [String[]]
-        $Params
-    )
-
-    $remote = Get-GitBranchParent
-    if ($remote -and ($remote -ne 'master')) {
-        $Params += @('-i', "`"$remote`"")
-        & git tfs $Params
-    } else {
-        & git tfs $Params
-    }
 }
 
 function Run-GitExtensions {
@@ -96,14 +45,14 @@ function Run-GitExtensions {
         [Parameter(Mandatory=$false, Position=0)]
         [String[]]
         $ArgumentList,
-        
+
         [Parameter(Mandatory=$false)]
         [Switch]
         $NoWait = $false
     )
-    
+
     $gitex = Get-Command gitex -TotalCount 1
-    
+
     # In case this is an alias, resolve it into actual path
     if ((Test-Path $gitex) -eq $false) {
         $gitex = $gitex.Definition
@@ -123,82 +72,248 @@ function Run-GitExtensions {
     }
 }
 
-function Push-ToTfs {
-    $branch = Get-GitBranch
-
-    # Pull before pushing
-    Pull-FromTfs
-    
-    #git tfs checkintool
-    Run-GitTfsCommand rcheckin
-    
-    # Occasionally, error 141 is reported by git,
-    # and it seems that the workaround is to avoid rebasing during checkin
-    if ($LastExitCode -eq 254) {
-        Write-Host "* Regular checkin failed, trying to push without rebasing (less safe)"
-
-        if ($branch -ne (Get-GitBranch)) {
-            git checkout $branch --force
+function Resolve-MergeConflicts {
+    while ( (Test-GitUncommittedChanges) -and (Test-GitRebaseInProgress) ) {
+        Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
+        Run-GitExtensions mergeconflicts
+        if ($LastExitCode -ne 0) {
+            Write-Host -Foreground Red '* Failed to rebase -- please fix manually'
+            Exit 1
         }
-        
-        Run-GitTfsCommand @('rcheckin', '-q')
+
+        git rebase '--continue'
     }
 
-    if ($LastExitCode -ne 0) {
-        Write-Host "* Failed to push to TFS"
+    if (Test-GitUncommittedChanges) {
+        Write-Host -Foreground Red '* Unexpected changes in working tree, please fix manually'
+        Exit 1
+    }
+}
+
+function Get-FeatureBranch {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Branch
+    )
+
+    if (($Branch -eq 'Develop') -or ($Branch -eq 'Dev')) {
+        return 'master'
+    } elseif ($Branch -like 'Dev_*') {
+        return $Branch.Substring(4)
+    } elseif ($Branch -like '*_Dev') {
+        return $Branch.Substring(0, $Branch.Length-4)
+    } else {
+        return $Branch
+    }
+}
+
+function Get-TfsRemote {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Branch
+    )
+
+    $featureBranch = Get-FeatureBranch $Branch
+    if ($featureBranch -eq 'master') {
+        return 'default'
     }
 
-    if ($branch -ne (Get-GitBranch)) {
-        git checkout $branch --force
+    $branches = @(git branch -r | %{ $_.Trim() })
+    $candidates = ($Branch, $featureBranch)
+    return $candidates | ?{ "tfs/$_" -in $branches } | Select-Object -First 1
+}
+
+function Test-NewCommits {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Branch,
+
+        [Parameter(Mandatory=$true, Position=1)]
+        [String]
+        $ParentBranch
+    )
+
+    # Get the number of commits on $Branch that are not in $ParentBranch
+    $changes = (git rev-list --left-only --count "$Branch...$ParentBranch").Trim()
+    if ($changes -eq '0') {
+        return $false
+    }
+
+    Write-Host -Foreground Yellow "* Found $changes new commits in $Branch"
+    return $true
+}
+
+function Rebase-IfNeeded {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Branch,
+
+        [Parameter(Mandatory=$true, Position=1)]
+        [String]
+        $ParentBranch
+    )
+
+    if (Test-NewCommits $ParentBranch $Branch) {
+        Write-Host -Foreground Green "* Rebasing '$Branch' on '$ParentBranch'"
+        git rebase -q --preserve-merges $ParentBranch
+        Resolve-MergeConflicts
     }
 }
 
 function Pull-FromTfs {
-    $branch = Get-GitBranch
-    $remoteBranch = Get-GitBranchParent
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $currentBranch,
 
-    if (Test-GitUncommittedChanges) {
-        Write-Host "* There are uncommitted changes in branch $branch. Please commit or reset to continue"
-        Run-GitExtensions commit
-        
+        [Parameter(Mandatory=$true, Position=1)]
+        [String]
+        $featureBranch,
+
+        [Parameter(Mandatory=$true, Position=2)]
+        [String]
+        $tfsRemote
+    )
+
+    Write-Host -Foreground Green "* Getting latest changes from branch '$featureBranch'"
+    if ($featureBranch -ne (Get-GitBranch)) {
+        git checkout $featureBranch --force
+    }
+
+    git tfs fetch --parents -i $tfsRemote
+    Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
+
+    if ($currentBranch -ne (Get-GitBranch)) {
+        git checkout $currentBranch
+        Rebase-IfNeeded $currentBranch $featureBranch
+    }
+}
+
+function Push-ToTfs {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $currentBranch,
+
+        [Parameter(Mandatory=$true, Position=1)]
+        [String]
+        $featureBranch,
+
+        [Parameter(Mandatory=$true, Position=2)]
+        [String]
+        $tfsRemote
+    )
+
+    Pull-FromTfs $currentBranch $featureBranch $tfsRemote
+    git tfs rcheckin -i $tfsRemote
+
+    if ($LastExitCode -eq 254) {
+        Write-Host -Foreground Yellow "* Regular checkin failed, trying to push without rebasing (less safe)"
+
+        git checkout $currentBranch --force
+        git tfs rcheckin -q -i $tfsRemote
+    }
+
+    if ($LastExitCode -ne 0) {
+        Write-Host -Foreground Red "* Failed to push to TFS"
+    }
+}
+
+function Merge-TrunkIntoFeatureBranch {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $currentBranch,
+
+        [Parameter(Mandatory=$true, Position=1)]
+        [String]
+        $featureBranch,
+
+        [Parameter(Mandatory=$true, Position=2)]
+        [String]
+        $tfsRemote
+    )
+
+    Pull-FromTfs master master default
+
+    if ($featureBranch -ne 'master') {
+        Pull-FromTfs $featureBranch $featureBranch $tfsRemote
+
+        # Then merge trunk into the feature branch (note that we are merging tfs/default to avoid any local changes on master branch)
+        Write-Host -Foreground Green "* Merging trunk into branch $featureBranch"
+        $commitMessage = "Merged trunk into branch $featureBranch"
+        git merge --commit --no-ff --no-edit -q -m "$commitMessage" tfs/default
+
+        # ... and resolve any merge conflicts along the way
         if (Test-GitUncommittedChanges) {
-            Write-Host "* Cannot continue due to uncommitted changes"
-            Exit 1
+            Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
+            Run-GitExtensions mergeconflicts
+            if ($LastExitCode -ne 0) {
+                Write-Host -Foreground Red "* Failed to merge -- please fix manually"
+                Exit 1
+            }
+
+            git commit -a --no-edit -q -m "$commitMessage"
         }
-    }
-    
-    # Checkout the TFS tracking branch
-    if ($remoteBranch -ne $branch) {
-        git checkout $remoteBranch --force
-    }
-    
-    Write-Host "* Pulling changes from TFS $(if ($remoteBranch -ne 'master') {'(branch '+$remoteBranch+')'})"
-    Run-GitTfsCommand @('pull', '--rebase')
-    
-    if ($remoteBranch -ne $branch) {
-        Write-Host "* Rebasing branch '$branch' on $remoteBranch"
-        git checkout $branch --force
-        git rebase -q $remoteBranch
+
+        # Push the merge to TFS
+        if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
+            Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
+            git tfs rcheckin -i $tfsRemote
+        } else {
+            Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
+        }
     }
 
-    while (Test-GitUncommittedChanges) {
-        Write-Host "* Conflicts detected, please resolve to continue"
-        Run-GitExtensions mergeconflicts
-        if ($LastExitCode -ne 0) {
-            Write-Host "* Failed to rebase -- please fix manually"
-            Exit 1
-        }
-        & git rebase "--continue"
+    if ($currentBranch -ne (Get-GitBranch)) {
+        git checkout $currentBranch
+        Rebase-IfNeeded $currentBranch $featureBranch
     }
 }
 
-# Set TFS client to use, to prevent errors with missing policy assemblies
-$env:GIT_TFS_CLIENT="2010"
+$currentBranch = Get-GitBranch
+$featureBranch = Get-FeatureBranch $currentBranch
+$tfsRemote = Get-TfsRemote $currentBranch
 
-if ($Action -eq "push") {
-    Push-ToTfs
-} else {
-    Pull-FromTfs
+if (!$tfsRemote) {
+    Write-Host -Foreground Red "* Cannot find TFS remote for branch $currentBranch"
+    Exit 1
 }
 
-Write-Host "** Completed **"
+Write-Host -Foreground Green "*     Git Branch: $currentBranch"
+if ($featureBranch -ne $currentBranch) {
+    Write-Host -Foreground Green "* Feature Branch: $featureBranch"
+}
+Write-Host -Foreground Green "*     TFS Branch: tfs/$tfsRemote"
+Write-Host
+
+$hasStash = Test-GitUncommittedChanges
+if (Test-GitUncommittedChanges) {
+    Write-Host -Foreground Yellow "* There are uncommitted changes in branch $currentBranch. Creating a stash"
+    git stash save -u
+}
+
+if ($Action -eq 'push') {
+    Push-ToTfs $currentBranch $featureBranch $tfsRemote
+} elseif ($Action -eq 'pull') {
+    Pull-FromTfs $currentBranch $featureBranch $tfsRemote
+} elseif ($Action -eq 'mergetrunk') {
+    Merge-TrunkIntoFeatureBranch $currentBranch $featureBranch $tfsRemote
+}
+
+if ($hasStash) {
+    Write-Host -Foreground Green '* Restoring stashed changes'
+    git stash pop
+}
+Write-Host -Foreground Green '** Completed **'
