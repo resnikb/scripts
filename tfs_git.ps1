@@ -90,6 +90,23 @@ function Resolve-MergeConflicts {
     }
 }
 
+function New-BranchMapping {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Definitions
+    )
+
+    $result = @()
+    [regex]$reDefinition = '(?imn)^\s*(?<source>.+?)\s*:\s*(?<target>.+?)\s*(#.*)?$'
+    foreach ($match in $reDefinition.Matches($Definitions)) {
+        $result += New-Object 'Tuple[string, string]'("^$($match.Groups['source'].Value)$", $match.Groups['target'])
+    }
+
+    return $result
+}
+
 function Get-FeatureBranch {
     Param
     (
@@ -98,15 +115,21 @@ function Get-FeatureBranch {
         $Branch
     )
 
-    if (($Branch -eq 'Develop') -or ($Branch -eq 'Dev')) {
-        return 'master'
-    } elseif ($Branch -like 'Dev_*') {
-        return $Branch.Substring(4)
-    } elseif ($Branch -like '*_Dev') {
-        return $Branch.Substring(0, $Branch.Length-4)
-    } else {
-        return $Branch
+    # Branch mapping is
+    if (!$script:branchMapping) {
+        $script:branchMapping = New-BranchMapping '
+            Develop: master
+            Dev: master
+            Refactor_.+: master     # Refactoring branches map to master
+            Dev_(.+): $1            # Convention: main development for feature branches is done on a Dev_ branch
+        '
     }
+
+    $result = $script:branchMapping | ?{ $Branch -match $_.Item1 } | %{ $Branch -replace $_.Item1, $_.Item2 } | Select-Object -First 1
+    if ($result) {
+        return $result
+    }
+    return $Branch
 }
 
 function Get-TfsRemote {
