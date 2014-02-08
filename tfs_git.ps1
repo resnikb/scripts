@@ -122,6 +122,10 @@ function Get-FeatureBranch {
             Dev: master
             Refactor_.+: master     # Refactoring branches map to master
             Dev_(.+): $1            # Convention: main development for feature branches is done on a Dev_ branch
+
+            # Git-flow compatible naming
+            # feature/.+: $0        # No rule needed for feature branches - they should just map to themselves
+            hotfix/.+: master       # Hotfix branches are done off trunk and usually do not have a matching TFS branch
         '
     }
 
@@ -186,7 +190,7 @@ function Rebase-IfNeeded {
 
     if (Test-NewCommits $ParentBranch $Branch) {
         Write-Host -Foreground Green "* Rebasing '$Branch' on '$ParentBranch'"
-        git rebase -q --preserve-merges $ParentBranch
+        git rebase -q --autosquash $ParentBranch  # Note the user of autosquash to process any in-comment commands
         Resolve-MergeConflicts
     }
 }
@@ -273,29 +277,50 @@ function Merge-TrunkIntoFeatureBranch {
     if ($featureBranch -ne 'master') {
         Pull-FromTfs $featureBranch $featureBranch $tfsRemote
 
-        # Then merge trunk into the feature branch (note that we are merging tfs/default to avoid any local changes on master branch)
-        Write-Host -Foreground Green "* Merging trunk into branch $featureBranch"
-        $commitMessage = "Merged trunk into branch $featureBranch"
-        git merge --commit --no-ff --no-edit -q -m "$commitMessage" tfs/default
-
-        # ... and resolve any merge conflicts along the way
-        if (Test-GitUncommittedChanges) {
-            Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
-            Run-GitExtensions mergeconflicts
-            if ($LastExitCode -ne 0) {
-                Write-Host -Foreground Red "* Failed to merge -- please fix manually"
-                Exit 1
-            }
-
-            git commit -a --no-edit -q -m "$commitMessage"
+        # There are new commits on this branch - we don't want to push those
+        # We only want to push the merge (when it happens).
+        # So, we create a temporary branch to hold current state
+        if (Test-NewCommits $featureBranch "tfs/$tfsRemote") {
+            $tempBranch = "$featureBranch-$([System.Guid]::NewGuid().ToString('N'))"
+            Write-Host -Foreground Yellow "* Branch '$featureBranch' has local commits - creating temporary branch '$tempBranch' to hold them"
+            git branch $tempBranch $featureBranch
+            git reset --hard "tfs/$tfsRemote"
         }
 
-        # Push the merge to TFS
-        if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
-            Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
-            git tfs rcheckin -i $tfsRemote
-        } else {
-            Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
+        try {
+            # Then merge trunk into the feature branch (note that we are merging tfs/default to avoid any local changes on master branch)
+            Write-Host -Foreground Green "* Merging trunk into branch $featureBranch"
+            $commitMessage = "Merged trunk into branch $featureBranch"
+            git merge --commit --no-ff --no-edit -q -m "$commitMessage" tfs/default
+
+            # ... and resolve any merge conflicts along the way
+            if (Test-GitUncommittedChanges) {
+                Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
+                Run-GitExtensions mergeconflicts
+                if ($LastExitCode -ne 0) {
+                    Write-Host -Foreground Red "* Failed to merge -- please fix manually"
+                    Exit 1
+                }
+
+                git commit -a --no-edit -q -m "$commitMessage"
+            }
+
+            # Push the merge to TFS
+            if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
+                Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
+                git tfs rcheckin -i $tfsRemote
+            } else {
+                Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
+            }
+        } finally {
+            if ($tempBranch) {
+                Write-Host -Foreground Yellow "* Restoring local commits for '$featureBranch'"
+                git checkout $tempBranch --force
+                Rebase-IfNeeded $tempBranch $featureBranch
+                git checkout $featureBranch --force
+                git reset --hard $tempBranch
+                git branch -D $tempBranch
+            }
         }
     }
 
@@ -338,5 +363,6 @@ if ($Action -eq 'push') {
 if ($hasStash) {
     Write-Host -Foreground Green '* Restoring stashed changes'
     git stash pop
+    Resolve-MergeConflicts
 }
 Write-Host -Foreground Green '** Completed **'
