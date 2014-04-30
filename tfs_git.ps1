@@ -231,7 +231,7 @@ function Pull-FromTfs {
         git checkout $featureBranch --force
     }
 
-    git tfs fetch --parents -i $tfsRemote
+    git tfs fetch -i $tfsRemote
     Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
 
     if ($currentBranch -ne (Get-GitBranch)) {
