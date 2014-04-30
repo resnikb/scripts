@@ -21,8 +21,12 @@
 Param
 (
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet('push', 'pull', 'mergetrunk')]
-    $Action
+    [ValidateSet('Push', 'Pull', 'MergeTrunk', 'StartFeature')]
+    $Action,
+
+    [Parameter(Mandatory=$false, Position=1)]
+    [String]
+    $Feature
 )
 
 function Get-GitBranch {
@@ -72,7 +76,18 @@ function Run-GitExtensions {
     }
 }
 
+function Test-GitConflicts {
+    return (git diff --name-only --diff-filter=U).ToString().Trim() -ne ''
+}
+
 function Resolve-MergeConflicts {
+    Param
+    (
+        [Parameter(Mandatory=$false, Position=0)]
+        [Switch]
+        $AllowUncommittedChanges=$false
+    )
+
     while ( (Test-GitUncommittedChanges) -and (Test-GitRebaseInProgress) ) {
         Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
         Run-GitExtensions mergeconflicts
@@ -84,7 +99,7 @@ function Resolve-MergeConflicts {
         git rebase '--continue'
     }
 
-    if (Test-GitUncommittedChanges) {
+    if (!$AllowUncommittedChanges -and (Test-GitUncommittedChanges)) {
         Write-Host -Foreground Red '* Unexpected changes in working tree, please fix manually'
         Exit 1
     }
@@ -291,7 +306,7 @@ function Merge-TrunkIntoFeatureBranch {
             # Then merge trunk into the feature branch (note that we are merging tfs/default to avoid any local changes on master branch)
             Write-Host -Foreground Green "* Merging trunk into branch $featureBranch"
             $commitMessage = "Merged trunk into branch $featureBranch"
-            git merge --commit --no-ff --no-edit -q -m "$commitMessage" tfs/default
+            git merge --commit --no-ff --no-edit --no-log -q -m "$commitMessage" tfs/default
 
             # ... and resolve any merge conflicts along the way
             if (Test-GitUncommittedChanges) {
@@ -309,6 +324,7 @@ function Merge-TrunkIntoFeatureBranch {
             if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
                 Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
                 git tfs rcheckin -i $tfsRemote
+                Resolve-MergeConflicts
             } else {
                 Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
             }
@@ -328,6 +344,59 @@ function Merge-TrunkIntoFeatureBranch {
         git checkout $currentBranch
         Rebase-IfNeeded $currentBranch $featureBranch
     }
+}
+
+function New-FeatureBranch {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Feature
+    )
+
+    if (!$Feature) {
+        Write-Host -Foreground Red "Feature name not specified"
+        return 1
+    }
+
+    if ((Get-GitBranch) -ne 'master') {
+        git checkout master --force
+    }
+
+    if ($Feature -like '*-*') {
+        $tfsFeature = [System.Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($Feature.ToLowerInvariant()).Replace('-', '')
+    } else {
+        $tfsFeature = $Feature
+    }
+
+    $gitBranch = $Feature
+    $tfsBranchPath = @(git tfs branch -r `
+                        | %{ $_.Split('$') | Select-Object -Last 1 } `
+                        | ?{ $_ -ne '' -and $tfsFeature -eq (Split-Path -Leaf $_) })
+
+    if (!$tfsBranchPath -or ($tfsBranchPath.Length -eq 0)) {
+        $tfsProjectRoot = git tfs branch `
+                            | ?{ $_ -like '*default ->*' } `
+                            | %{ $_.Split('$') } `
+                            | Select-Object -Last 1 `
+                            | Split-Path -Parent `
+                            | %{ $_.Replace('\', '/') }
+
+        $tfsBranchPath = "`$$tfsProjectRoot/branches/$tfsFeature"
+
+        Write-Host -Foreground Green "* Creating TFS branch '$tfsBranchPath' and local git branch '$gitBranch'"
+        git tfs branch $tfsBranchPath $gitBranch --comment="Created branch $Feature"
+    } elseif ($tfsBranchPath.Length -eq 1) {
+        $tfsBranchPath = "`$$tfsBranchPath"
+        Write-Host -Foreground Green "* Using existing TFS branch '$tfsBranchPath' and creating local git branch '$gitBranch'"
+        git tfs branch --init $tfsBranchPath $gitBranch
+    } else {
+        Write-Host -Foreground Red "* Cannot initialise branch for feature '$Feature', multiple TFS branches exist: $([string]::join(', ', $tfsBranchPath)), $($tfsBranchPath.Length)"
+        return 1
+    }
+
+    git checkout $gitBranch
+    return 0
 }
 
 $currentBranch = Get-GitBranch
@@ -358,11 +427,16 @@ if ($Action -eq 'push') {
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
 } elseif ($Action -eq 'mergetrunk') {
     Merge-TrunkIntoFeatureBranch $currentBranch $featureBranch $tfsRemote
+} elseif ($Action -eq 'StartFeature') {
+    $exitCode = New-FeatureBranch $Feature
 }
 
-if ($hasStash) {
+if ($hasStash -and ($currentBranch -eq (Get-GitBranch))) {
     Write-Host -Foreground Green '* Restoring stashed changes'
     git stash pop
-    Resolve-MergeConflicts
+    Resolve-MergeConflicts -AllowUncommittedChanges
 }
 Write-Host -Foreground Green '** Completed **'
+if ($exitCode) {
+    Exit $exitCode
+}
