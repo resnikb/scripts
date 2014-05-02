@@ -91,7 +91,7 @@ function Resolve-MergeConflicts {
     while ( (Test-GitUncommittedChanges) -and (Test-GitRebaseInProgress) ) {
         Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
         Run-GitExtensions mergeconflicts
-        if ($LastExitCode -ne 0) {
+        if (($LastExitCode -ne 0) -or (Test-GitUncommittedChanges)) {
             Write-Host -Foreground Red '* Failed to rebase -- please fix manually'
             Exit 1
         }
@@ -312,7 +312,7 @@ function Merge-TrunkIntoFeatureBranch {
             if (Test-GitUncommittedChanges) {
                 Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
                 Run-GitExtensions mergeconflicts
-                if ($LastExitCode -ne 0) {
+                if (($LastExitCode -ne 0) -or (Test-GitUncommittedChanges)) {
                     Write-Host -Foreground Red "* Failed to merge -- please fix manually"
                     Exit 1
                 }
