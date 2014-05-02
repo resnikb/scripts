@@ -80,6 +80,26 @@ function Test-GitConflicts {
     return (git diff --name-only --diff-filter=U).ToString().Trim() -ne ''
 }
 
+function Git-Rcheckin {
+    Param
+    (
+        [Parameter(Mandatory=$true, Position=0)]
+        [String]
+        $Remote,
+
+        [Parameter(Mandatory=$false, Position=1)]
+        [Switch]
+        $Quick=$false
+    )
+
+    $qCommand = ''
+    if ($Quick) {
+        $qCommand = '-q'
+    }
+
+    git tfs rcheckin -i $Remote -a --no-build-default-comment "$qCommand"
+}
+
 function Resolve-MergeConflicts {
     Param
     (
@@ -257,13 +277,13 @@ function Push-ToTfs {
     )
 
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
-    git tfs rcheckin -i $tfsRemote
+    Git-Rcheckin $tfsRemote
 
     if ($LastExitCode -eq 254) {
         Write-Host -Foreground Yellow "* Regular checkin failed, trying to push without rebasing (less safe)"
 
         git checkout $currentBranch --force
-        git tfs rcheckin -q -i $tfsRemote
+        Git-Rcheckin $tfsRemote -Quick
     }
 
     if ($LastExitCode -ne 0) {
@@ -323,7 +343,7 @@ function Merge-TrunkIntoFeatureBranch {
             # Push the merge to TFS
             if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
                 Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
-                git tfs rcheckin -i $tfsRemote
+                Git-Rcheckin $tfsRemote
                 Resolve-MergeConflicts
             } else {
                 Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
