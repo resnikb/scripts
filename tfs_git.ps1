@@ -21,12 +21,12 @@
 Param
 (
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet('Push', 'Pull', 'MergeTrunk', 'StartFeature')]
+    [ValidateSet('Push', 'Pull', 'MergeTrunk', 'MergeBranch', 'StartFeature')]
     $Action,
 
     [Parameter(Mandatory=$false, Position=1)]
     [String]
-    $Feature
+    $Name
 )
 
 function Get-GitBranch {
@@ -77,7 +77,12 @@ function Run-GitExtensions {
 }
 
 function Test-GitConflicts {
-    return (git diff --name-only --diff-filter=U).ToString().Trim() -ne ''
+    $diff = git diff --name-only --diff-filter=U
+    if ($diff -eq $null) {
+        return $false
+    }
+
+    return $diff.ToString().Trim() -ne ''
 }
 
 function Git-Rcheckin {
@@ -97,7 +102,9 @@ function Git-Rcheckin {
         $qCommand = '-q'
     }
 
-    git tfs rcheckin -i $Remote -a --no-build-default-comment "$qCommand"
+    # Use Tee-Object here to send output to both console and variable
+    git tfs rcheckin -i $Remote -a --no-build-default-comment "$qCommand" | Tee-Object -Variable rcheckinOutput
+    return $rcheckinOutput
 }
 
 function Resolve-MergeConflicts {
@@ -291,7 +298,7 @@ function Push-ToTfs {
     }
 }
 
-function Merge-TrunkIntoFeatureBranch {
+function Merge-Branch {
     Param
     (
         [Parameter(Mandatory=$true, Position=0)]
@@ -304,12 +311,22 @@ function Merge-TrunkIntoFeatureBranch {
 
         [Parameter(Mandatory=$true, Position=2)]
         [String]
-        $tfsRemote
+        $tfsRemote,
+
+        [Parameter(Mandatory=$true, Position=3)]
+        [String]
+        $branchToMerge
     )
 
-    Pull-FromTfs master master default
+    $canUseCheckinTool = $true
+    if (($branchToMerge -eq 'master') -or ($featureBranch -eq 'master') -or ($currentBranch -eq 'master')) {
+        $canUseCheckinTool = $false
+    }
 
-    if ($featureBranch -ne 'master') {
+    $tfsRemoteToMerge = Get-TfsRemote $branchToMerge
+    Pull-FromTfs $branchToMerge $branchToMerge $tfsRemoteToMerge
+
+    if ($featureBranch -ne $branchToMerge) {
         Pull-FromTfs $featureBranch $featureBranch $tfsRemote
 
         # There are new commits on this branch - we don't want to push those
@@ -323,10 +340,10 @@ function Merge-TrunkIntoFeatureBranch {
         }
 
         try {
-            # Then merge trunk into the feature branch (note that we are merging tfs/default to avoid any local changes on master branch)
-            Write-Host -Foreground Green "* Merging trunk into branch $featureBranch"
-            $commitMessage = "Merged trunk into branch $featureBranch"
-            git merge --commit --no-ff --no-edit --no-log -q -m "$commitMessage" tfs/default
+            # Then merge into the feature branch (note that we are merging tfs remote to avoid any local changes on source branch)
+            Write-Host -Foreground Green "* Merging $branchToMerge into branch $featureBranch"
+            $commitMessage = "Merged $branchToMerge into branch $featureBranch"
+            git merge --commit --no-ff --no-edit --no-log -q -m "$commitMessage" "tfs/$tfsRemoteToMerge"
 
             # ... and resolve any merge conflicts along the way
             if (Test-GitUncommittedChanges) {
@@ -343,8 +360,17 @@ function Merge-TrunkIntoFeatureBranch {
             # Push the merge to TFS
             if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
                 Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
-                Git-Rcheckin $tfsRemote
+                Git-Rcheckin $tfsRemote | ?{ $_ -like '*The item*is not a branch of*' } | Select-Object -First 1 -OutVariable failedMessage
                 Resolve-MergeConflicts
+
+                if ($canUseCheckinTool -and ($failedMessage -ne $null)) {
+                    git tfs checkintool -i $tfsRemote --no-build-default-comment -m "$commitMessage"
+                }
+
+                if ($LastExitCode -ne 0) {
+                    Write-Host -Foreground Red '** Failed to push to TFS'
+                    return 1
+                }
             } else {
                 Write-Host -Foreground Yellow '* No new commits created, nothing will be pushed to TFS'
             }
@@ -364,6 +390,8 @@ function Merge-TrunkIntoFeatureBranch {
         git checkout $currentBranch
         Rebase-IfNeeded $currentBranch $featureBranch
     }
+
+    return 0
 }
 
 function New-FeatureBranch {
@@ -446,9 +474,11 @@ if ($Action -eq 'push') {
 } elseif ($Action -eq 'pull') {
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
 } elseif ($Action -eq 'mergetrunk') {
-    Merge-TrunkIntoFeatureBranch $currentBranch $featureBranch $tfsRemote
+    Merge-Branch $currentBranch $featureBranch $tfsRemote master
 } elseif ($Action -eq 'StartFeature') {
-    $exitCode = New-FeatureBranch $Feature
+    $exitCode = New-FeatureBranch $Name
+} elseif ($Action -eq 'MergeBranch') {
+    $exitCode = Merge-Branch $currentBranch $featureBranch $tfsRemote $Name
 }
 
 if ($hasStash -and ($currentBranch -eq (Get-GitBranch))) {
