@@ -104,7 +104,7 @@ function Git-Rcheckin {
 
     # Use Tee-Object here to send output to both console and variable
     git tfs rcheckin -i $Remote -a --no-build-default-comment "$qCommand" | Tee-Object -Variable rcheckinOutput
-    return $rcheckinOutput
+    $script:rcheckinOutput = $rcheckinOutput
 }
 
 function Resolve-MergeConflicts {
@@ -284,6 +284,7 @@ function Push-ToTfs {
     )
 
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
+
     Git-Rcheckin $tfsRemote
 
     if ($LastExitCode -eq 254) {
@@ -360,9 +361,10 @@ function Merge-Branch {
             # Push the merge to TFS
             if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
                 Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
-                Git-Rcheckin $tfsRemote | ?{ $_ -like '*The item*is not a branch of*' } | Select-Object -First 1 -OutVariable failedMessage
+                Git-Rcheckin $tfsRemote
                 Resolve-MergeConflicts
 
+                $failedMessage =  $script:rcheckinOutput | ?{ $_ -like '*The item*is not a branch of*' } | Select-Object -First 1
                 if ($canUseCheckinTool -and ($failedMessage -ne $null)) {
                     git tfs checkintool -i $tfsRemote --no-build-default-comment -m "$commitMessage"
                 }
@@ -474,7 +476,7 @@ if ($Action -eq 'push') {
 } elseif ($Action -eq 'pull') {
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
 } elseif ($Action -eq 'mergetrunk') {
-    Merge-Branch $currentBranch $featureBranch $tfsRemote master
+    $exitCode = Merge-Branch $currentBranch $featureBranch $tfsRemote master
 } elseif ($Action -eq 'StartFeature') {
     $exitCode = New-FeatureBranch $Name
 } elseif ($Action -eq 'MergeBranch') {
