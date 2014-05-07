@@ -253,13 +253,32 @@ function Pull-FromTfs {
         $tfsRemote
     )
 
-    Write-Host -Foreground Green "* Getting latest changes from branch '$featureBranch'"
-    if ($featureBranch -ne (Get-GitBranch)) {
-        git checkout $featureBranch --force
+    # Use a script-level array to store the branches we have already pulled from.
+    # This will prevent multiple pulls of the same branch
+    if (!$script:BranchesPulledFrom) {
+        $script:BranchesPulledFrom = @()
+    }
+    $alreadyPulled = $false
+    if ($featureBranch -in $script:BranchesPulledFrom) {
+        $alreadyPulled = $true
+    } else {
+        $script:BranchesPulledFrom += @($featureBranch)
     }
 
-    git tfs fetch -i $tfsRemote
-    Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
+    if (!$alreadyPulled) {
+        if ($featureBranch -ne 'master') {
+            Pull-FromTfs $featureBranch master default
+        }
+
+        Write-Host -Foreground Green "* Getting latest changes from branch '$featureBranch'"
+
+        if ($featureBranch -ne (Get-GitBranch)) {
+            git checkout $featureBranch --force
+        }
+
+        git tfs fetch -i $tfsRemote
+        Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
+    }
 
     if ($currentBranch -ne (Get-GitBranch)) {
         git checkout $currentBranch
