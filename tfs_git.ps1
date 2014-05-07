@@ -29,12 +29,49 @@ Param
     $Name
 )
 
+function Get-LocalOrParentPath($path) {
+    $checkIn = Get-Item -Force .
+    while ($checkIn -ne $null) {
+        $pathToTest = [System.IO.Path]::Combine($checkIn.fullname, $path)
+        if (Test-Path -LiteralPath $pathToTest) {
+            return $pathToTest
+        } else {
+            $checkIn = $checkIn.parent
+        }
+    }
+    return $null
+}
+
 function Get-GitBranch {
-    return (git branch | Select-String "\*").ToString().Substring(1).Trim()
+    # On Windows (or case insensitive systems in general), git will not mark a branch with *
+    # if it has been checked out using a different case (e.g. your branch is XYZ but you checked it out as xyz).
+    # If that is the case, we'll try a few other approaches to get the current branch
+    $branch = git branch 2>$null | Select-String '\*'
+    if ($branch -ne $null) {
+        return $branch.ToString().Substring(1).Trim()
+    }
+
+    $branch = git symbolic-ref HEAD 2>$null
+    if ($branch -ne $null) {
+        $refDir = $branch.ToString().Trim()
+        $branch = Split-Path -Leaf $refDir
+        $gitDir = Get-LocalOrParentPath .git
+        if ($gitDir -ne $null) {
+            # The magic symbol here is * which forces Get-Item to enumerate matching file system entries
+            # and return them in their correct case.
+            # Without it, Get-Item would return the entry exactly as it was in $refDir
+            $branchDir = Get-Item -Force "$gitDir/$refDir*" | ?{ $_.Name -eq $branch } | Select-Object -First 1
+            if ($branchDir -ne $null) {
+                return $branchDir.Name
+            }
+        }
+
+        return $branch
+    }
 }
 
 function Test-GitRebaseInProgress {
-    $rootDir = git 'rev-parse' '--show-toplevel'
+    $rootDir = git 'rev-parse' '--show-toplevel' 2>$null
     return (Test-Path -PathType Container (Join-Path $rootDir 'rebase-apply')) -or (Test-Path -PathType Container (Join-Path $rootDir 'rebase-merge'))
 }
 
@@ -103,7 +140,7 @@ function Git-Rcheckin {
     }
 
     # Use Tee-Object here to send output to both console and variable
-    git tfs rcheckin -i $Remote -a --no-build-default-comment "$qCommand" | Tee-Object -Variable rcheckinOutput
+    git tfs rcheckin -i $Remote -a --no-build-default-comment $qCommand | Tee-Object -Variable rcheckinOutput
     $script:rcheckinOutput = $rcheckinOutput
 }
 
