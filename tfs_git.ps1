@@ -304,7 +304,7 @@ function Pull-FromTfs {
 
     if (!$alreadyPulled) {
         if ($featureBranch -ne 'master') {
-            Pull-FromTfs $featureBranch master default
+            Pull-FromTfs master master default
         }
 
         Write-Host -Foreground Green "* Getting latest changes from branch '$featureBranch'"
