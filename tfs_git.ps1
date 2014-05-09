@@ -501,7 +501,17 @@ function New-FeatureBranch {
         return 1
     }
 
-    git checkout $gitBranch
+    if ($gitBranch -ne (Get-GitBranch)) {
+        # Sometimes git tfs fails to create local git branch, so we have to
+        # This will checkout the branch if it exists and create it if it doesn't
+        $branches = git branch | ?{ $_ -like "* $gitBranch"} | Select-Object -First 1
+        if ($branches -ne $null) {
+            git checkout $gitBranch
+        } else {
+            git checkout tfs/$tfsFeature -b $gitBranch
+        }
+    }
+
     return 0
 }
 
