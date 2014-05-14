@@ -269,7 +269,7 @@ function Rebase-IfNeeded {
 
     if (Test-NewCommits $ParentBranch $Branch) {
         Write-Host -Foreground Green "* Rebasing '$Branch' on '$ParentBranch'"
-        git rebase -q --autosquash $ParentBranch  # Note the user of autosquash to process any in-comment commands
+        git rebase -q --preserve-merges --autosquash $ParentBranch  # Note the use of autosquash to process any in-comment commands and preserve-merges to preserve merges
         Resolve-MergeConflicts
     }
 }
