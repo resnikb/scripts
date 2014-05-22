@@ -154,7 +154,18 @@ function Resolve-MergeConflicts {
 
     while ( (Test-GitUncommittedChanges) -and (Test-GitRebaseInProgress) ) {
         Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
-        Run-GitExtensions mergeconflicts
+        $elapsedTime = Measure-Command { Run-GitExtensions mergeconflicts }
+
+        if ($elapsedTime.TotalSeconds -le 5) {
+            $LastExitCode = 0
+            Write-Host -Foreground Yellow '* Waiting for you to resolve conflicts manually, press ENTER to continue'
+            do
+            {
+                $key = $host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            }
+            while ($key.VirtualKeyCode -ne 13)
+        }
+
         if (($LastExitCode -ne 0) -or (Test-GitConflicts)) {
             Write-Host -Foreground Red '* Failed to rebase -- please fix manually'
             Exit 1
