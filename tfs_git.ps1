@@ -70,9 +70,14 @@ function Get-GitBranch {
     }
 }
 
-function Test-GitRebaseInProgress {
+function Get-GitDir {
     $rootDir = git 'rev-parse' '--show-toplevel' 2>$null
-    return (Test-Path -PathType Container (Join-Path $rootDir 'rebase-apply')) -or (Test-Path -PathType Container (Join-Path $rootDir 'rebase-merge'))
+    return (Join-Path $rootDir '.git')
+}
+
+function Test-GitRebaseInProgress {
+    $gitDir = Get-GitDir
+    return (Test-Path -PathType Container (Join-Path $gitDir 'rebase-apply')) -or (Test-Path -PathType Container (Join-Path $gitDir 'rebase-merge'))
 }
 
 function Test-GitUncommittedChanges {
@@ -152,7 +157,7 @@ function Resolve-MergeConflicts {
         $AllowUncommittedChanges=$false
     )
 
-    while ( (Test-GitUncommittedChanges) -and (Test-GitRebaseInProgress) ) {
+    while ( (Test-GitConflicts) -and (Test-GitRebaseInProgress) ) {
         Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
         $elapsedTime = Measure-Command { Run-GitExtensions mergeconflicts }
 
@@ -433,6 +438,7 @@ function Merge-Branch {
 
                 $failedMessage =  $script:rcheckinOutput | ?{ $_ -like '*The item*is not a branch of*' } | Select-Object -First 1
                 if ($canUseCheckinTool -and ($failedMessage -ne $null)) {
+                    Write-Host -Foreground Yellow "* Regular checkin failed, trying with checkintool"
                     git tfs checkintool -i $tfsRemote --no-build-default-comment -m "$commitMessage"
                 }
 
