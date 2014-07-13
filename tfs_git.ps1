@@ -26,7 +26,11 @@ Param
 
     [Parameter(Mandatory=$false, Position=1)]
     [String]
-    $Name
+    $Name,
+
+    [Parameter(Mandatory=$false)]
+    [Switch]
+    $QuickPush=$false
 )
 
 function Get-LocalOrParentPath($path) {
@@ -357,13 +361,17 @@ function Push-ToTfs {
 
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
 
-    Git-Rcheckin $tfsRemote
-
-    if ($LastExitCode -eq 254) {
-        Write-Host -Foreground Yellow "* Regular checkin failed, trying to push without rebasing (less safe)"
-
-        git checkout $currentBranch --force
+    if ($QuickPush) {
+        Write-Host -Foreground Yellow "* Pushing without rebasing"
         Git-Rcheckin $tfsRemote -Quick
+    } else {
+        Git-Rcheckin $tfsRemote
+        if ($LastExitCode -eq 254) {
+            Write-Host -Foreground Yellow "* Regular checkin failed, trying to push without rebasing (less safe)"
+
+            git checkout $currentBranch --force
+            Git-Rcheckin $tfsRemote -Quick
+        }
     }
 
     if ($LastExitCode -ne 0) {
