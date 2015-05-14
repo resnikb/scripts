@@ -26,11 +26,7 @@ Param
 
     [Parameter(Mandatory=$false, Position=1)]
     [String]
-    $Name,
-
-    [Parameter(Mandatory=$false)]
-    [Switch]
-    $QuickPush=$false
+    $Name
 )
 
 function Get-LocalOrParentPath($path) {
@@ -136,20 +132,11 @@ function Git-Rcheckin {
     (
         [Parameter(Mandatory=$true, Position=0)]
         [String]
-        $Remote,
-
-        [Parameter(Mandatory=$false, Position=1)]
-        [Switch]
-        $Quick=$false
+        $Remote
     )
 
-    $qCommand = ''
-    if ($Quick) {
-        $qCommand = '-q'
-    }
-
     # Use Tee-Object here to send output to both console and variable
-    git tfs rcheckin -i $Remote -a --no-build-default-comment $qCommand | Tee-Object -Variable rcheckinOutput
+    git tfs rcheckin -i $Remote -a --no-build-default-comment | Tee-Object -Variable rcheckinOutput
     $script:rcheckinOutput = $rcheckinOutput
 }
 
@@ -161,7 +148,7 @@ function Resolve-MergeConflicts {
         $AllowUncommittedChanges=$false
     )
 
-    while ( (Test-GitConflicts) -and (Test-GitRebaseInProgress) ) {
+    while (Test-GitConflicts) {
         Write-Host -Foreground Red '* Conflicts detected, please resolve to continue'
         $elapsedTime = Measure-Command { Run-GitExtensions mergeconflicts }
 
@@ -180,7 +167,9 @@ function Resolve-MergeConflicts {
             Exit 1
         }
 
-        git rebase '--continue'
+        if (Test-GitRebaseInProgress) {
+            git rebase '--continue'
+        }
     }
 
     if (!$AllowUncommittedChanges -and (Test-GitUncommittedChanges)) {
@@ -289,7 +278,10 @@ function Rebase-IfNeeded {
 
     if (Test-NewCommits $ParentBranch $Branch) {
         Write-Host -Foreground Green "* Rebasing '$Branch' on '$ParentBranch'"
-        git rebase -q --preserve-merges --autosquash $ParentBranch  # Note the use of autosquash to process any in-comment commands and preserve-merges to preserve merges
+
+        # Note the use of autosquash to process any in-comment commands and preserve-merges to preserve merges
+        # We also specify the target branch, to ensure correctness
+        git rebase -q --preserve-merges --autosquash $ParentBranch $Branch
         Resolve-MergeConflicts
     }
 }
@@ -307,7 +299,11 @@ function Pull-FromTfs {
 
         [Parameter(Mandatory=$true, Position=2)]
         [String]
-        $tfsRemote
+        $tfsRemote,
+
+        [Parameter(Mandatory=$false)]
+        [Switch]
+        $NoRebase=$false
     )
 
     # Use a script-level array to store the branches we have already pulled from.
@@ -323,23 +319,18 @@ function Pull-FromTfs {
     }
 
     if (!$alreadyPulled) {
-        if ($featureBranch -ne 'master') {
-            Pull-FromTfs master master default
-        }
-
         Write-Host -Foreground Green "* Getting latest changes from branch '$featureBranch'"
 
-        if ($featureBranch -ne (Get-GitBranch)) {
-            git checkout $featureBranch --force
+        $followSwitch = '--parents'
+        if ($tfsRemote -eq 'default') {
+            $followSwitch = '--ignore-branches'
         }
 
-        git tfs fetch -i $tfsRemote
-        Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
+        git tfs fetch $followSwitch -i $tfsRemote
     }
 
-    if ($currentBranch -ne (Get-GitBranch)) {
-        git checkout $currentBranch
-        Rebase-IfNeeded $currentBranch $featureBranch
+    if ($currentBranch -and !$NoRebase) {
+        Rebase-IfNeeded $currentBranch "tfs/$tfsRemote"
     }
 }
 
@@ -361,19 +352,7 @@ function Push-ToTfs {
 
     Pull-FromTfs $currentBranch $featureBranch $tfsRemote
 
-    if ($QuickPush) {
-        Write-Host -Foreground Yellow "* Pushing without rebasing"
-        Git-Rcheckin $tfsRemote -Quick
-    } else {
-        Git-Rcheckin $tfsRemote
-        if ($LastExitCode -eq 254) {
-            Write-Host -Foreground Yellow "* Regular checkin failed, trying to push without rebasing (less safe)"
-
-            git checkout $currentBranch --force
-            Git-Rcheckin $tfsRemote -Quick
-        }
-    }
-
+    Git-Rcheckin $tfsRemote
     if ($LastExitCode -ne 0) {
         Write-Host -Foreground Red "* Failed to push to TFS"
     }
@@ -405,19 +384,18 @@ function Merge-Branch {
     }
 
     $tfsRemoteToMerge = Get-TfsRemote $branchToMerge
-    Pull-FromTfs $branchToMerge $branchToMerge $tfsRemoteToMerge
+    Pull-FromTfs $branchToMerge $branchToMerge $tfsRemoteToMerge -NoRebase
 
     if ($featureBranch -ne $branchToMerge) {
-        Pull-FromTfs $featureBranch $featureBranch $tfsRemote
+        Pull-FromTfs $featureBranch $featureBranch $tfsRemote -NoRebase
 
         # There are new commits on this branch - we don't want to push those
         # We only want to push the merge (when it happens).
         # So, we create a temporary branch to hold current state
         if (Test-NewCommits $featureBranch "tfs/$tfsRemote") {
             $tempBranch = "$featureBranch-$([System.Guid]::NewGuid().ToString('N'))"
-            Write-Host -Foreground Yellow "* Branch '$featureBranch' has local commits - creating temporary branch '$tempBranch' to hold them"
-            git branch $tempBranch $featureBranch
-            git reset --hard "tfs/$tfsRemote"
+            Write-Host -Foreground Yellow "* Branch '$featureBranch' has local commits - they will not be part of this merge"
+            git checkout -B $tempBranch --no-track "tfs/$tfsRemote"
         }
 
         try {
@@ -439,7 +417,7 @@ function Merge-Branch {
             }
 
             # Push the merge to TFS
-            if ((Test-NewCommits $featureBranch "tfs/$tfsRemote")) {
+            if ((Test-NewCommits (Get-GitBranch) "tfs/$tfsRemote")) {
                 Write-Host -Foreground Green "* Pushing feature branch '$featureBranch' to TFS branch 'tfs/$tfsRemote'"
                 Git-Rcheckin $tfsRemote
                 Resolve-MergeConflicts
@@ -460,17 +438,14 @@ function Merge-Branch {
         } finally {
             if ($tempBranch) {
                 Write-Host -Foreground Yellow "* Restoring local commits for '$featureBranch'"
-                git checkout $tempBranch --force
-                Rebase-IfNeeded $tempBranch $featureBranch
-                git checkout $featureBranch --force
-                git reset --hard $tempBranch
+                git checkout $featureBranch -f
                 git branch -D $tempBranch
+                Rebase-IfNeeded $featureBranch "tfs/$tfsRemote"
             }
         }
     }
 
     if ($currentBranch -ne (Get-GitBranch)) {
-        git checkout $currentBranch
         Rebase-IfNeeded $currentBranch $featureBranch
     }
 
@@ -576,7 +551,7 @@ if ($Action -eq 'push') {
 
 if ($hasStash -and ($currentBranch -eq (Get-GitBranch))) {
     Write-Host -Foreground Green '* Restoring stashed changes'
-    git stash pop
+    git stash pop -q
     Resolve-MergeConflicts -AllowUncommittedChanges
 }
 Write-Host -Foreground Green '** Completed **'
