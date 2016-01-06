@@ -46,12 +46,12 @@ function Get-GitBranch {
     # On Windows (or case insensitive systems in general), git will not mark a branch with *
     # if it has been checked out using a different case (e.g. your branch is XYZ but you checked it out as xyz).
     # If that is the case, we'll try a few other approaches to get the current branch
-    $branch = git branch 2>$null | Select-String '\*'
+    $branch = git branch  | Select-String '\*'
     if ($branch -ne $null) {
         return $branch.ToString().Substring(1).Trim()
     }
 
-    $branch = git symbolic-ref HEAD 2>$null
+    $branch = git symbolic-ref HEAD
     if ($branch -ne $null) {
         $refDir = $branch.ToString().Trim()
         $branch = Split-Path -Leaf $refDir
@@ -70,9 +70,13 @@ function Get-GitBranch {
     }
 }
 
+function Get-TopLevelDir {
+    $rootDir = git 'rev-parse' '--show-toplevel'
+    return $rootDir
+}
+
 function Get-GitDir {
-    $rootDir = git 'rev-parse' '--show-toplevel' 2>$null
-    return (Join-Path $rootDir '.git')
+    return (Join-Path (Get-TopLevelDir) '.git')
 }
 
 function Test-GitRebaseInProgress {
