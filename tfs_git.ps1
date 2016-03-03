@@ -242,7 +242,7 @@ function Get-TfsRemote {
     }
 
     $branches = @(git branch -r | %{ $_.Trim() })
-    $candidates = ($Branch, $featureBranch)
+    $candidates = ($Branch, $featureBranch, "_$Branch", "_$featureBranch")
     return $candidates | ?{ "tfs/$_" -in $branches } | Select-Object -First 1
 }
 
