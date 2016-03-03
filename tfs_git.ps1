@@ -139,8 +139,19 @@ function Git-Rcheckin {
         $Remote
     )
 
+    if ($script:authorsFile -eq $null) {
+        # Look for authors.txt
+        $authorsFile = @( (Join-Path (Get-TopLevelDir) authors.txt), (Join-Path $PSScriptRoot authors.txt) ) | ?{ Test-Path $_ } | Select-Object -First 1
+        if ($authorsFile) {
+            $script:authorsFile = "`"--authors=$authorsFile`""
+            Write-Host "Using authors file $authorsFile"
+        } else {
+            $script:authorsFile = ''
+        }
+    }
+
     # Use Tee-Object here to send output to both console and variable
-    git tfs rcheckin -i $Remote -a --no-build-default-comment | Tee-Object -Variable rcheckinOutput
+    git tfs rcheckin -i $Remote -a --no-build-default-comment $script:authorsFile | Tee-Object -Variable rcheckinOutput
     $script:rcheckinOutput = $rcheckinOutput
 }
 
